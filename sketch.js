@@ -46,8 +46,6 @@ async function setup() {
 function draw() {
   background(245);
 
-  drawTitle();
-  drawLegend();
 
   // draw circles in grid
   let hovered = null;
@@ -80,19 +78,7 @@ function draw() {
     noFill();
     ellipse(0, 0, drawD, drawD);
 
-    // text centered, ensure contrast. draw a small label background to keep text readable
-    textAlign(CENTER, CENTER);
-    textSize(constrain(drawD / 8, 8, 20));
-    let avg = it.colors && it.colors.length > 0 ? averageColor(it.colors) : color(200);
-    let textCol = chooseContrast(avg);
-    // label background color: inverse of text for contrast with alpha
-    let labelBg = (red(textCol) === 255 && green(textCol) === 255 && blue(textCol) === 255) ? color(0, 150) : color(255, 180);
-    noStroke();
-    fill(labelBg);
-    ellipse(0, 0, drawD * 0.7, drawD * 0.28);
-    fill(textCol);
-    noStroke();
-    text(it.name, 0, 0);
+    // no on-canvas text: all info shown in tooltip only
 
     pop();
 
@@ -120,7 +106,6 @@ function computeLayout() {
     it.d = map(it.score, minS, maxS, minDiameter, maxDiameter);
     if (!isFinite(it.d)) it.d = minDiameter;
   });
-
   // grid layout: determine cols based on width and max item dimension
   let maxD = Math.max(...items.map(it => it.d));
   cellSize = maxD + 24;
@@ -129,25 +114,29 @@ function computeLayout() {
 
   let totalW = cols * cellSize;
   let offsetX = (width - totalW) / 2 + cellSize / 2;
-  let offsetY = 140; // reserve top space for title
+  // smaller top offset since we no longer draw a title
+  let offsetY = 60;
 
-  // Ensure at least half the grid (rows) is visible on the initial screen
-  let visibleRows = ceil(rows / 2);
-  let margin = 48;
-  let availableForVisible = max(windowHeight - offsetY - margin, 80);
-  let requiredForVisible = visibleRows * cellSize;
+  // Determine available space (with margins)
+  let margin = 24;
+  let availableWidth = max(width - margin * 2, 80);
+  let availableHeight = max(windowHeight - offsetY - margin, 80);
+  let requiredWidth = cols * cellSize;
+  let requiredHeight = rows * cellSize;
 
-  // If not enough space, scale items and cellSize down so visibleRows fit (but don't go below minDiameter)
-  if (requiredForVisible > availableForVisible) {
-    let scaleFactor = availableForVisible / requiredForVisible;
-    // prevent scaling so small that items go below minDiameter
-    let minOriginalD = Math.min(...items.map(it => it.d));
-    let minScaleLimit = minDiameter / minOriginalD;
-    if (scaleFactor < minScaleLimit) scaleFactor = minScaleLimit;
-    // apply scaling
+  // compute global scale factor to fit both width and height
+  let scaleFactor = 1;
+  if (requiredWidth > availableWidth) scaleFactor = min(scaleFactor, availableWidth / requiredWidth);
+  if (requiredHeight > availableHeight) scaleFactor = min(scaleFactor, availableHeight / requiredHeight);
+
+  // prevent scaling so small that items go below minDiameter
+  let minOriginalD = Math.min(...items.map(it => it.d));
+  let minScaleLimit = minDiameter / minOriginalD;
+  if (scaleFactor < minScaleLimit) scaleFactor = minScaleLimit;
+
+  if (scaleFactor < 1) {
     items.forEach(it => it.d = it.d * scaleFactor);
     cellSize = cellSize * scaleFactor;
-    // recompute cols/rows using new cellSize
     cols = max(1, floor(width / cellSize));
     rows = ceil(items.length / cols);
     totalW = cols * cellSize;
@@ -162,11 +151,8 @@ function computeLayout() {
     items[i].y = offsetY + r * cellSize;
   }
 
-  // set canvas height so the rest of the grid can be scrolled into view
-  let totalHeight = offsetY + rows * cellSize + 40;
-  // ensure canvas is at least the window height
-  let canvasH = max(totalHeight, windowHeight);
-  resizeCanvas(windowWidth, canvasH);
+  // ensure canvas uses full window size so everything is visible
+  resizeCanvas(windowWidth, windowHeight);
 }
 
 function drawTitle() {
@@ -204,20 +190,28 @@ function scoreStrokeColor(score) {
 }
 
 function drawTooltip(it, mx, my) {
-  let txt = `${it.name}: ${it.score}`;
+  // multi-line tooltip: name on first line, score on second
+  let line1 = it.name || '';
+  let line2 = `Score: ${isFinite(it.score) && it.score !== 0 ? it.score.toFixed(2) : '—'}`;
   textSize(12);
   let pad = 8;
-  let w = textWidth(txt) + pad * 2;
-  let h = 22;
+  let lines = [line1, line2];
+  let maxW = 0;
+  lines.forEach(l => { maxW = max(maxW, textWidth(l)); });
+  let w = maxW + pad * 2;
+  let h = lines.length * 18 + pad;
   let x = mx + 14;
   let y = my + 8;
   push();
   fill(40, 230);
+  stroke(0, 80);
   rect(x, y, w, h, 6);
   fill(255);
   noStroke();
-  textAlign(LEFT, CENTER);
-  text(txt, x + pad, y + h / 2);
+  textAlign(LEFT, TOP);
+  for (let i = 0; i < lines.length; i++) {
+    text(lines[i], x + pad, y + pad / 2 + i * 18);
+  }
   pop();
 }
 
