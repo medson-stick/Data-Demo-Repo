@@ -1,464 +1,346 @@
+
+/*
+    Get 0 column in csv, country name
+    get 2 column in csv, ladder score
+    show text for each country
+    show happiness score in the circle
+    use ai to make it cool
+*/
+
 let table;
-let countries = []; // { name, score }
-let bubbles = [];   // { name, score, x, y, r, colors, ready }
-let restIndex = null;
+let items = [];
 
-const NAME_FIXES = {
-  "United States": "United States of America",
-  "Russia": "Russian Federation",
-  "Vietnam": "Viet Nam",
-  "Iran": "Iran (Islamic Republic of)",
-  "Syria": "Syrian Arab Republic",
-  "Bolivia": "Bolivia (Plurinational State of)",
-  "Venezuela": "Venezuela (Bolivarian Republic of)",
-  "Tanzania": "Tanzania, United Republic of",
-  "Congo (Brazzaville)": "Congo",
-  "Congo (Kinshasa)": "Congo, Democratic Republic of the",
-  "Laos": "Lao People's Democratic Republic",
-  "South Korea": "Korea (Republic of)",
-  "North Korea": "Korea (Democratic People's Republic of)",
-  "Czechia": "Czech Republic",
-  "Eswatini": "Swaziland",
-  "Ivory Coast": "Côte d'Ivoire",
-  "Palestine": "Palestine, State of",
-};
+// visual params
+let minDiameter = 40;
+let maxDiameter = 140;
+let cols = 1;
+let cellSize = 200;
 
-function preload() {
-  // Must be in same folder as index.html
-  table = loadTable("World-happiness-report-2024.csv", "csv", "header");
-}
 
-function setup() {
+async function setup() {
   createCanvas(windowWidth, windowHeight);
-  textFont("system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif");
+  table = await loadTable('/Data/World-happiness-report-2024.csv', ',', 'header');
+  console.log(table);
 
-  // Your CSV: column 0 country, column 2 ladder score
-  const countryCol = table.getColumn(0);
-  const scoreCol = table.getColumn(2);
+  let country = table.getColumn(0);
+  let happiness = table.getColumn(2).map(v => parseFloat(v));
 
-  countries = [];
-  for (let i = 0; i < table.getRowCount(); i++) {
-    const name = (countryCol[i] ?? "").trim();
-    const score = Number(scoreCol[i]);
-    if (name && Number.isFinite(score)) countries.push({ name, score });
-  }
+  // build items
+  items = country.map((c, i) => ({
+    name: c,
+    score: isNaN(happiness[i]) ? 0 : happiness[i],
+    colors: null,
+    flagImg: null,
+    x: 0,
+    y: 0,
+    d: 0,
+    loaded: false
+  }));
 
-  // Sort happiest to least happy
-  countries.sort((a, b) => b.score - a.score);
+  computeLayout();
 
-  buildLayout();
-  loadRestCountriesIndex();
+  // fetch flags and extract colors for each country (async)
+  items.forEach((it, idx) => fetchFlagAndExtractColors(it, idx));
 }
 
 function draw() {
-  background(246);
+  background(245);
 
   drawTitle();
+  drawLegend();
 
-  const hovered = getHoveredBubble();
+  // draw circles in grid
+  let hovered = null;
+  for (let i = 0; i < items.length; i++) {
+    let it = items[i];
+    let radius = it.d / 2;
+    let mx = mouseX;
+    let my = mouseY;
+    let distToMouse = dist(mx, my, it.x, it.y);
+    let isHover = distToMouse < radius;
 
-  for (const b of bubbles) {
-    const isHovered = hovered === b;
-    const rr = isHovered ? b.r * 1.12 : b.r;
+    push();
+    translate(it.x, it.y);
 
-    // Border indicates score range (legend explains)
-    const border = scoreBorderColor(b.score);
+    let drawD = it.d * (isHover ? 1.12 : 1);
 
-    drawFlagCircle(b.x, b.y, rr, b.colors, b.ready, border);
-    drawCenteredLabel(b.x, b.y, rr, b.name, b.colors, b.ready);
+    // draw circle using all extracted flag colors (as pie slices). fallback to single color
+    if (it.colors && it.colors.length > 0) {
+      drawCircleWithColors(it.colors, drawD);
+    } else {
+      fill(color(200));
+      noStroke();
+      ellipse(0, 0, drawD, drawD);
+    }
+
+    // stroke based on score ranges to show score category
+    let strokeCol = scoreStrokeColor(it.score);
+    stroke(strokeCol);
+    strokeWeight(2);
+    noFill();
+    ellipse(0, 0, drawD, drawD);
+
+    // text centered, ensure contrast. draw a small label background to keep text readable
+    textAlign(CENTER, CENTER);
+    textSize(constrain(drawD / 8, 8, 20));
+    let avg = it.colors && it.colors.length > 0 ? averageColor(it.colors) : color(200);
+    let textCol = chooseContrast(avg);
+    // label background color: inverse of text for contrast with alpha
+    let labelBg = (red(textCol) === 255 && green(textCol) === 255 && blue(textCol) === 255) ? color(0, 150) : color(255, 180);
+    noStroke();
+    fill(labelBg);
+    ellipse(0, 0, drawD * 0.7, drawD * 0.28);
+    fill(textCol);
+    noStroke();
+    text(it.name, 0, 0);
+
+    pop();
+
+    if (isHover) hovered = it;
   }
 
-  drawLegend();
-  if (hovered) drawTooltip(hovered);
+  // tooltip
+  if (hovered) drawTooltip(hovered, mouseX, mouseY);
 }
 
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
-  buildLayout();
+  computeLayout();
 }
 
-// ---------------- Layout (grid, no overlap) ----------------
-function buildLayout() {
-  bubbles = [];
+function computeLayout() {
+  // map scores to diameters
+  let scores = items.map(it => it.score);
+  let minS = Math.min(...scores.filter(s => s > 0));
+  let maxS = Math.max(...scores);
+  if (!isFinite(minS)) minS = 0; // fallback
 
-  const topPad = 86;
-  const bottomPad = 72;
-  const leftPad = 18;
-  const rightPad = 18;
+  // pick diameters
+  items.forEach(it => {
+    it.d = map(it.score, minS, maxS, minDiameter, maxDiameter);
+    if (!isFinite(it.d)) it.d = minDiameter;
+  });
 
-  const usableW = max(1, width - leftPad - rightPad);
-  const usableH = max(1, height - topPad - bottomPad);
+  // grid layout: determine cols based on width and max item dimension
+  let maxD = Math.max(...items.map(it => it.d));
+  cellSize = maxD + 24;
+  cols = max(1, floor(width / cellSize));
+  let rows = ceil(items.length / cols);
 
-  const n = countries.length;
+  let totalW = cols * cellSize;
+  let offsetX = (width - totalW) / 2 + cellSize / 2;
+  let offsetY = 140; // reserve top space for title
 
-  const idealCols = ceil(sqrt((n * usableW) / usableH));
-  const cols = max(1, idealCols);
-  const rows = ceil(n / cols);
+  // Ensure at least half the grid (rows) is visible on the initial screen
+  let visibleRows = ceil(rows / 2);
+  let margin = 48;
+  let availableForVisible = max(windowHeight - offsetY - margin, 80);
+  let requiredForVisible = visibleRows * cellSize;
 
-  const cellW = usableW / cols;
-  const cellH = usableH / rows;
-
-  const scores = countries.map((c) => c.score);
-  const minS = min(scores);
-  const maxS = max(scores);
-
-  for (let i = 0; i < n; i++) {
-    const col = i % cols;
-    const row = floor(i / cols);
-
-    const cx = leftPad + col * cellW + cellW / 2;
-    const cy = topPad + row * cellH + cellH / 2;
-
-    const t = (countries[i].score - minS) / max(0.0001, maxS - minS);
-    const maxR = min(cellW, cellH) * 0.45;
-    const minR = min(cellW, cellH) * 0.18;
-    const r = lerp(minR, maxR, t);
-
-    bubbles.push({
-      name: countries[i].name,
-      score: countries[i].score,
-      x: cx,
-      y: cy,
-      r,
-      colors: null,
-      ready: false,
-    });
-  }
-}
-
-// ---------------- API: Rest Countries + flag sampling ----------------
-async function loadRestCountriesIndex() {
-  try {
-    const url = "https://restcountries.com/v3.1/all?fields=name,altSpellings,flags";
-    const res = await fetch(url);
-    restIndex = await res.json();
-
-    for (const b of bubbles) {
-      const match = findRestCountryMatch(b.name);
-      const flagUrl = match?.flags?.png || match?.flags?.svg;
-
-      if (!flagUrl) {
-        b.colors = [cObj(210, 210, 210), cObj(170, 170, 170), cObj(235, 235, 235)];
-        b.ready = true;
-        continue;
-      }
-
-      loadImage(
-        flagUrl,
-        (img) => {
-          b.colors = extractDominantColors(img, 3);
-          b.ready = true;
-        },
-        () => {
-          b.colors = [cObj(210, 210, 210), cObj(170, 170, 170), cObj(235, 235, 235)];
-          b.ready = true;
-        }
-      );
-    }
-  } catch (e) {
-    console.warn("Rest Countries fetch failed:", e);
-    for (const b of bubbles) {
-      b.colors = [cObj(210, 210, 210), cObj(170, 170, 170), cObj(235, 235, 235)];
-      b.ready = true;
-    }
-  }
-}
-
-function findRestCountryMatch(datasetName) {
-  if (!restIndex) return null;
-
-  const fixed = NAME_FIXES[datasetName] || datasetName;
-  const target = normName(fixed);
-
-  let best = null;
-  let bestScore = -1;
-
-  for (const c of restIndex) {
-    const names = [
-      c?.name?.common,
-      c?.name?.official,
-      ...(c?.altSpellings || []),
-    ].filter(Boolean);
-
-    for (const n of names) {
-      const cand = normName(n);
-      if (cand === target) return c;
-
-      const s = tokenOverlapScore(target, cand);
-      if (s > bestScore) {
-        bestScore = s;
-        best = c;
-      }
-    }
+  // If not enough space, scale items and cellSize down so visibleRows fit (but don't go below minDiameter)
+  if (requiredForVisible > availableForVisible) {
+    let scaleFactor = availableForVisible / requiredForVisible;
+    // prevent scaling so small that items go below minDiameter
+    let minOriginalD = Math.min(...items.map(it => it.d));
+    let minScaleLimit = minDiameter / minOriginalD;
+    if (scaleFactor < minScaleLimit) scaleFactor = minScaleLimit;
+    // apply scaling
+    items.forEach(it => it.d = it.d * scaleFactor);
+    cellSize = cellSize * scaleFactor;
+    // recompute cols/rows using new cellSize
+    cols = max(1, floor(width / cellSize));
+    rows = ceil(items.length / cols);
+    totalW = cols * cellSize;
+    offsetX = (width - totalW) / 2 + cellSize / 2;
   }
 
-  return bestScore >= 0.34 ? best : null;
+  // position items
+  for (let i = 0; i < items.length; i++) {
+    let c = i % cols;
+    let r = floor(i / cols);
+    items[i].x = offsetX + c * cellSize;
+    items[i].y = offsetY + r * cellSize;
+  }
+
+  // set canvas height so the rest of the grid can be scrolled into view
+  let totalHeight = offsetY + rows * cellSize + 40;
+  // ensure canvas is at least the window height
+  let canvasH = max(totalHeight, windowHeight);
+  resizeCanvas(windowWidth, canvasH);
 }
 
-function normName(s) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9 ]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function tokenOverlapScore(a, b) {
-  const A = new Set(a.split(" ").filter((w) => w.length > 2));
-  const B = new Set(b.split(" ").filter((w) => w.length > 2));
-  if (!A.size || !B.size) return 0;
-  let inter = 0;
-  for (const w of A) if (B.has(w)) inter++;
-  const union = A.size + B.size - inter;
-  return inter / union;
-}
-
-// ---------------- Drawing ----------------
 function drawTitle() {
   push();
-  noStroke();
-  fill(20);
-  textAlign(LEFT, TOP);
-
-  textSize(min(28, width * 0.03));
-  text("World Happiness Report 2024", 18, 14);
-
-  fill(90);
-  textSize(min(14, width * 0.018));
-  text("Size = ladder score • Fill = flag colors • Border = score range (see legend) • Hover for exact score", 18, 48);
-  pop();
-}
-
-function drawFlagCircle(x, y, r, colors, ready, borderCol) {
-  push();
-  translate(x, y);
-  noStroke();
-
-  if (!ready || !colors || !colors.length) {
-    fill(230);
-    circle(0, 0, r * 2);
-    stroke(200);
-    noFill();
-    circle(0, 0, r * 2);
-    pop();
-    return;
-  }
-
-  const k = colors.length;
-  const step = TWO_PI / k;
-
-  for (let i = 0; i < k; i++) {
-    const c = colors[i];
-    fill(c.r, c.g, c.b);
-    arc(0, 0, r * 2, r * 2, i * step, (i + 1) * step, PIE);
-  }
-
-  stroke(borderCol);
-  strokeWeight(max(1, r * 0.06));
-  noFill();
-  circle(0, 0, r * 2);
-
-  pop();
-}
-
-function drawCenteredLabel(x, y, r, label, colors, ready) {
-  push();
-  translate(x, y);
-
-  // Choose text color based on average fill brightness
-  let fillCol = color(20);
-  if (ready && colors && colors.length) {
-    const avg = avgColor(colors);
-    const lum = relLum(avg.r, avg.g, avg.b);
-    fillCol = lum > 0.55 ? color(15) : color(255);
-  }
-
-  // Outline for readability
-  const outline = (fillCol.levels[0] > 200) ? color(0, 140) : color(255, 170);
-
   textAlign(CENTER, CENTER);
-  textLeading(r * 0.28);
-
-  let ts = constrain(r * 0.34, 9, 18);
-  if (label.length > 14) ts = max(9, ts * 0.85);
-  if (label.length > 22) ts = max(9, ts * 0.75);
-  textSize(ts);
-
-  stroke(outline);
-  strokeWeight(3);
-  fill(fillCol);
-
-  // Use bounding box so longer names wrap
-  const boxW = r * 1.55;
-  const boxH = r * 1.25;
-  text(label, 0, 0, boxW, boxH);
-
-  pop();
-}
-
-function getHoveredBubble() {
-  for (const b of bubbles) {
-    if (dist(mouseX, mouseY, b.x, b.y) <= b.r) return b;
-  }
-  return null;
-}
-
-function drawTooltip(b) {
-  const pad = 10;
-  const lines = [`${b.name}`, `Ladder score: ${b.score.toFixed(3)}`];
-
-  push();
-  textAlign(LEFT, TOP);
-  textSize(13);
-
-  const w = max(textWidth(lines[0]), textWidth(lines[1])) + pad * 2;
-  const h = 44;
-
-  const x = constrain(mouseX + 14, 10, width - w - 10);
-  const y = constrain(mouseY + 14, 10, height - h - 10);
-
-  noStroke();
-  fill(255, 245);
-  rect(x, y, w, h, 10);
-
-  stroke(0, 40);
-  noFill();
-  rect(x, y, w, h, 10);
-
-  noStroke();
-  fill(20);
-  text(lines[0], x + pad, y + 7);
-  fill(60);
-  text(lines[1], x + pad, y + 24);
-
-  pop();
-}
-
-// Legend: border colors indicate score ranges
-function drawLegend() {
-  const items = [
-    { label: "High (≥ 6.5)", col: color(40, 170, 70) },
-    { label: "Medium (5.5–6.49)", col: color(230, 170, 20) },
-    { label: "Low (< 5.5)", col: color(220, 60, 60) },
-  ];
-
-  const x = 18;
-  const y = height - 54;
-
-  push();
-  noStroke();
+  textSize(28);
   fill(30);
-  textAlign(LEFT, TOP);
+  text('World Happiness — 2024 (circle size ∝ score)', width / 2, 40);
+  pop();
+}
+
+function drawLegend() {
+  let legendX = 16;
+  let legendY = 64;
+  let boxSize = 14;
+  let ranges = [ {label: '< 4', col: color(220,70,70)}, {label: '4–5.5', col: color(240,160,60)}, {label: '5.5–6.9', col: color(240,220,90)}, {label: '≥ 6.9', col: color(120,200,120)} ];
   textSize(12);
-  text("Score ranges (border):", x, y);
+  textAlign(LEFT, CENTER);
+  fill(50);
+  noStroke();
+  text('Score category (border):', legendX, legendY - 12);
+  for (let i = 0; i < ranges.length; i++) {
+    fill(ranges[i].col);
+    rect(legendX, legendY + i * 20, boxSize, boxSize, 3);
+    fill(40);
+    text(ranges[i].label, legendX + boxSize + 8, legendY + i * 20 + boxSize / 2);
+  }
+}
 
-  let cx = x;
-  let cy = y + 18;
+function scoreStrokeColor(score) {
+  if (score <= 4) return color(220,70,70);
+  if (score <= 5.5) return color(240,160,60);
+  if (score <= 6.9) return color(240,220,90);
+  return color(120,200,120);
+}
 
-  for (const it of items) {
-    stroke(it.col);
-    strokeWeight(5);
-    noFill();
-    circle(cx + 10, cy + 10, 18);
+function drawTooltip(it, mx, my) {
+  let txt = `${it.name}: ${it.score}`;
+  textSize(12);
+  let pad = 8;
+  let w = textWidth(txt) + pad * 2;
+  let h = 22;
+  let x = mx + 14;
+  let y = my + 8;
+  push();
+  fill(40, 230);
+  rect(x, y, w, h, 6);
+  fill(255);
+  noStroke();
+  textAlign(LEFT, CENTER);
+  text(txt, x + pad, y + h / 2);
+  pop();
+}
 
-    noStroke();
-    fill(50);
-    text(it.label, cx + 26, cy + 2);
+function chooseContrast(c) {
+  // expects p5.Color or hex
+  let col = c instanceof p5.Color ? c : color(c);
+  let r = red(col), g = green(col), b = blue(col);
+  // relative luminance
+  let L = 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255);
+  return L > 0.55 ? color(0) : color(255);
+}
 
-    cy += 20;
+async function fetchFlagAndExtractColors(item, idx) {
+  // try restcountries API
+  let name = item.name;
+  let url = `https://restcountries.com/v3.1/name/${encodeURIComponent(name)}?fullText=false`;
+  try {
+    let res = await fetch(url);
+    if (!res.ok) throw new Error('not found');
+    let data = await res.json();
+    // choose first match
+    let first = data[0];
+    let flagUrl = first && first.flags && (first.flags.png || first.flags.svg) ? (first.flags.png || first.flags.svg) : null;
+    if (flagUrl) {
+      loadImage(flagUrl, img => {
+        item.flagImg = img;
+        item.colors = extractColorsFromImage(img, 4);
+        item.loaded = true;
+      }, err => {
+        item.colors = [color(200)];
+        item.loaded = true;
+      });
+    } else {
+      item.colors = [color(200)];
+      item.loaded = true;
+    }
+  } catch (e) {
+    // fallback: try a simpler search (first word)
+    let firstWord = name.split(' ')[0];
+    if (firstWord && firstWord.toLowerCase() !== name.toLowerCase()) {
+      try {
+        let res2 = await fetch(`https://restcountries.com/v3.1/name/${encodeURIComponent(firstWord)}?fullText=false`);
+        if (res2.ok) {
+          let data2 = await res2.json();
+          let flagUrl = data2[0] && data2[0].flags && (data2[0].flags.png || data2[0].flags.svg);
+          if (flagUrl) {
+            loadImage(flagUrl, img => {
+              item.flagImg = img;
+              item.colors = extractColorsFromImage(img, 4);
+              item.loaded = true;
+            }, () => { item.colors = [color(200)]; item.loaded = true; });
+            return;
+          }
+        }
+      } catch (e2) {}
+    }
+    item.colors = [color(200)];
+    item.loaded = true;
+  }
+}
+
+function extractColorsFromImage(img, topN = 3) {
+  // draw small version and sample pixels to find dominant colors
+  let g = createGraphics(32, 32);
+  g.imageMode(CENTER);
+  g.background(255);
+  let s = min(g.width, g.height);
+  g.push();
+  g.translate(g.width / 2, g.height / 2);
+  g.image(img, 0, 0, s, s);
+  g.pop();
+  g.loadPixels();
+  let counts = {};
+  for (let x = 0; x < g.width; x += 2) {
+    for (let y = 0; y < g.height; y += 2) {
+      let i = (x + y * g.width) * 4;
+      let r = g.pixels[i];
+      let gg = g.pixels[i + 1];
+      let b = g.pixels[i + 2];
+      // quantize
+      let qr = Math.round(r / 32) * 32;
+      let qg = Math.round(gg / 32) * 32;
+      let qb = Math.round(b / 32) * 32;
+      let key = `${qr},${qg},${qb}`;
+      counts[key] = (counts[key] || 0) + 1;
+    }
+  }
+  let entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  let cols = entries.slice(0, topN).map(e => {
+    let parts = e[0].split(',').map(v => parseInt(v));
+    return color(parts[0], parts[1], parts[2]);
+  });
+  if (cols.length === 0) cols = [color(200)];
+  return cols;
+}
+
+function drawCircleWithColors(colsArr, diameter) {
+  let n = colsArr.length;
+  let r = diameter / 2;
+  push();
+  noStroke();
+  for (let i = 0; i < n; i++) {
+    let a0 = (TWO_PI / n) * i - HALF_PI;
+    let a1 = (TWO_PI / n) * (i + 1) - HALF_PI;
+    fill(colsArr[i]);
+    arc(0, 0, diameter, diameter, a0, a1, PIE);
   }
   pop();
 }
 
-function scoreBorderColor(score) {
-  if (score >= 6.5) return color(40, 170, 70);
-  if (score >= 5.5) return color(230, 170, 20);
-  return color(220, 60, 60);
+function averageColor(colsArr) {
+  let rs = 0, gs = 0, bs = 0;
+  colsArr.forEach(c => {
+    let col = c instanceof p5.Color ? c : color(c);
+    rs += red(col);
+    gs += green(col);
+    bs += blue(col);
+  });
+  let n = colsArr.length || 1;
+  return color(rs / n, gs / n, bs / n);
 }
 
-// ---------------- Flag color extraction (simple k-means) ----------------
-function extractDominantColors(img, k = 3) {
-  img.loadPixels();
-  const step = 8;
-  const samples = [];
+/*
+    Please edit my code so that theh text shows up in the center of each circle. Each circle should be the colors of the national flag of the country it represents. You can use an API to get the flag colors based on the country name. Make sure to handle cases where the country name might not match perfectly with the API's database. Make sure none of the circles overlap each other, and that the text is clearly visible against the circle's background color. You can also add a tooltip that shows the exact happiness score when hovering over each circle. The circles should be in a grid layout to ensure they do not overlap, and the size of each circle should be proportional to the happiness score. Additionally, you can add a legend that explains the color coding of the circles based on the happiness score ranges. When hovered over, the circle should be a bit larger t0 show that it is being interacted with, and the tooltip should appear next to the cursor. You can also add a title and labels to make the visualization more informative. Make sure to test your code with different screen sizes to ensure it is responsive and looks good on all devices.
 
-  for (let y = 0; y < img.height; y += step) {
-    for (let x = 0; x < img.width; x += step) {
-      const idx = 4 * (y * img.width + x);
-      const r = img.pixels[idx];
-      const g = img.pixels[idx + 1];
-      const b = img.pixels[idx + 2];
-      const a = img.pixels[idx + 3];
-
-      if (a < 200) continue;
-      if (r > 245 && g > 245 && b > 245) continue; // ignore near-white background
-
-      samples.push([r, g, b]);
-    }
-  }
-
-  if (samples.length < 10) {
-    return [cObj(210, 210, 210), cObj(170, 170, 170), cObj(235, 235, 235)];
-  }
-
-  const centers = [];
-  for (let i = 0; i < k; i++) {
-    centers.push(samples[floor(random(samples.length))].slice());
-  }
-
-  for (let iter = 0; iter < 6; iter++) {
-    const buckets = Array.from({ length: k }, () => ({ sum: [0, 0, 0], n: 0 }));
-
-    for (const p of samples) {
-      let bestI = 0;
-      let bestD = Infinity;
-      for (let i = 0; i < k; i++) {
-        const d = sq(p[0] - centers[i][0]) + sq(p[1] - centers[i][1]) + sq(p[2] - centers[i][2]);
-        if (d < bestD) {
-          bestD = d;
-          bestI = i;
-        }
-      }
-      buckets[bestI].sum[0] += p[0];
-      buckets[bestI].sum[1] += p[1];
-      buckets[bestI].sum[2] += p[2];
-      buckets[bestI].n += 1;
-    }
-
-    for (let i = 0; i < k; i++) {
-      if (!buckets[i].n) continue;
-      centers[i][0] = buckets[i].sum[0] / buckets[i].n;
-      centers[i][1] = buckets[i].sum[1] / buckets[i].n;
-      centers[i][2] = buckets[i].sum[2] / buckets[i].n;
-    }
-  }
-
-  // Sort by saturation-ish so we keep “flaggy” colors
-  const cols = centers
-    .map((c) => cObj(round(c[0]), round(c[1]), round(c[2])))
-    .sort((a, b) => chroma(b) - chroma(a));
-
-  return cols.slice(0, k);
-}
-
-function cObj(r, g, b) {
-  return { r, g, b };
-}
-
-function avgColor(colors) {
-  let r = 0, g = 0, b = 0;
-  for (const c of colors) { r += c.r; g += c.g; b += c.b; }
-  const n = max(1, colors.length);
-  return { r: r / n, g: g / n, b: b / n };
-}
-
-function relLum(r, g, b) {
-  const sr = r / 255, sg = g / 255, sb = b / 255;
-  return 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
-}
-
-function chroma(c) {
-  return max(c.r, c.g, c.b) - min(c.r, c.g, c.b);
-}
+*/
