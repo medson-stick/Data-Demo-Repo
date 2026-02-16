@@ -96,54 +96,70 @@ function windowResized() {
 
 function computeLayout() {
   // map scores to diameters
+  if (!items || items.length === 0) {
+    resizeCanvas(windowWidth, windowHeight);
+    return;
+  }
   let scores = items.map(it => it.score);
   let minS = Math.min(...scores.filter(s => s > 0));
   let maxS = Math.max(...scores);
   if (!isFinite(minS)) minS = 0; // fallback
 
-  // pick diameters
+  // pick base diameters (before scaling)
   items.forEach(it => {
     it.d = map(it.score, minS, maxS, minDiameter, maxDiameter);
     if (!isFinite(it.d)) it.d = minDiameter;
   });
-  // grid layout: determine cols based on width and max item dimension
+
+  // We'll compute a cellSize that accounts for hover enlargement so hovered nodes still fit.
+  const hoverFactor = 1.12;
+  const spacing = 24; // gap between cells
+
+  // start with max diameter
   let maxD = Math.max(...items.map(it => it.d));
-  cellSize = maxD + 24;
-  cols = max(1, floor(width / cellSize));
-  let rows = ceil(items.length / cols);
 
-  let totalW = cols * cellSize;
-  let offsetX = (width - totalW) / 2 + cellSize / 2;
-  // smaller top offset since we no longer draw a title
-  let offsetY = 60;
-
-  // Determine available space (with margins)
+  // iterative adjustment: compute cols/rows and a global scale so the whole grid fits
+  let offsetY = 60; // top offset
   let margin = 24;
-  let availableWidth = max(width - margin * 2, 80);
-  let availableHeight = max(windowHeight - offsetY - margin, 80);
-  let requiredWidth = cols * cellSize;
-  let requiredHeight = rows * cellSize;
+  let scale = 1;
 
-  // compute global scale factor to fit both width and height
-  let scaleFactor = 1;
-  if (requiredWidth > availableWidth) scaleFactor = min(scaleFactor, availableWidth / requiredWidth);
-  if (requiredHeight > availableHeight) scaleFactor = min(scaleFactor, availableHeight / requiredHeight);
-
-  // prevent scaling so small that items go below minDiameter
-  let minOriginalD = Math.min(...items.map(it => it.d));
-  let minScaleLimit = minDiameter / minOriginalD;
-  if (scaleFactor < minScaleLimit) scaleFactor = minScaleLimit;
-
-  if (scaleFactor < 1) {
-    items.forEach(it => it.d = it.d * scaleFactor);
-    cellSize = cellSize * scaleFactor;
-    cols = max(1, floor(width / cellSize));
-    rows = ceil(items.length / cols);
-    totalW = cols * cellSize;
-    offsetX = (width - totalW) / 2 + cellSize / 2;
+  for (let iter = 0; iter < 6; iter++) {
+    let effectiveD = maxD * hoverFactor * scale;
+    let cell = effectiveD + spacing;
+    let colsTry = max(1, floor((width - margin * 2) / cell));
+    let rowsTry = ceil(items.length / colsTry);
+    let requiredW = colsTry * cell;
+    let requiredH = rowsTry * cell;
+    let availW = max(width - margin * 2, 80);
+    let availH = max(windowHeight - offsetY - margin, 80);
+    // compute new scale to fit both dimensions
+    let scaleW = availW / requiredW;
+    let scaleH = availH / requiredH;
+    let newScale = min(1, scaleW, scaleH) * scale;
+    // prevent shrinking below min diameter
+    let minOriginalD = Math.min(...items.map(it => it.d));
+    let minScaleLimit = minDiameter / (minOriginalD * hoverFactor);
+    if (newScale < minScaleLimit) newScale = minScaleLimit;
+    // if scale stabilizes, break
+    if (abs(newScale - scale) < 1e-3) {
+      scale = newScale;
+      cols = colsTry;
+      break;
+    }
+    scale = newScale;
+    cols = colsTry;
   }
 
-  // position items
+  // apply final scale to diameters and recompute layout
+  items.forEach(it => it.d = it.d * scale);
+  maxD = Math.max(...items.map(it => it.d));
+  cellSize = maxD * hoverFactor + spacing;
+  cols = max(1, floor((width - margin * 2) / cellSize));
+  let rows = ceil(items.length / cols);
+  let totalW = cols * cellSize;
+  let offsetX = (width - totalW) / 2 + cellSize / 2;
+
+  // position items in grid
   for (let i = 0; i < items.length; i++) {
     let c = i % cols;
     let r = floor(i / cols);
@@ -151,7 +167,7 @@ function computeLayout() {
     items[i].y = offsetY + r * cellSize;
   }
 
-  // ensure canvas uses full window size so everything is visible
+  // ensure canvas uses full window size
   resizeCanvas(windowWidth, windowHeight);
 }
 
